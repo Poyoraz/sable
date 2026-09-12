@@ -1,15 +1,17 @@
 package dev.ryanhcode.sable.sublevel.storage.holding;
 
 import dev.ryanhcode.sable.Sable;
+import dev.ryanhcode.sable.SableConfig;
 import dev.ryanhcode.sable.api.SubLevelHelper;
-import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.mixinterface.toast.SableToastableServer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import dev.ryanhcode.sable.sublevel.storage.HoldingSubLevel;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
+import dev.ryanhcode.sable.sublevel.storage.SubLevelTicketsSavedData;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelData;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelSerializer;
 import dev.ryanhcode.sable.sublevel.storage.serialization.SubLevelStorage;
@@ -22,8 +24,11 @@ import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.objects.*;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.entity.Visibility;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Vector3d;
@@ -33,7 +38,6 @@ import java.io.IOException;
 import java.util.*;
 
 public class SubLevelHoldingChunkMap implements AutoCloseable {
-    public static boolean VERBOSE = false;
     private final ServerLevel level;
     private final ServerSubLevelContainer container;
 
@@ -74,6 +78,8 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
      */
     private final LongSet chunksToLoad = new LongOpenHashSet();
 
+    private boolean verboseLogging = false;
+
     public SubLevelHoldingChunkMap(final ServerLevel level, final ServerSubLevelContainer container) {
         this.level = level;
         this.container = container;
@@ -99,31 +105,37 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
     }
 
     private void processLoad(final ChunkPos chunkPos) {
-        if (VERBOSE) {
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Processing load of chunk at {}", chunkPos);
         }
 
         if (this.queuedUnloads.contains(chunkPos)) {
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Removing chunk at {} from queued unloads", chunkPos);
             }
             this.queuedUnloads.remove(chunkPos);
         }
 
-        if (this.loadedHoldingChunks.containsKey(chunkPos.toLong())) {
+        final SubLevelHoldingChunk existingChunk = this.loadedHoldingChunks.get(chunkPos.toLong());
+        if (existingChunk != null) {
+            existingChunk.markKeepLoaded();
             return;
         }
 
         // when the chunk is loaded, we have to also load the holding chunk if it exists
-        this.getOrLoadHoldingChunk(chunkPos, false);
+        final SubLevelHoldingChunk holdingChunk = this.getOrLoadHoldingChunk(chunkPos, false);
+
+        if (holdingChunk != null) {
+            holdingChunk.markKeepLoaded();
+        }
     }
 
-    private void processUnload(final ChunkPos chunkPos) {
+    private void processUnload(final ChunkPos chunkPos, final Collection<ServerSubLevel> forceLoaded) {
         if (!this.loadedHoldingChunks.containsKey(chunkPos.toLong())) {
             return;
         }
 
-        if (VERBOSE) {
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Processing unload for chunk {}", chunkPos);
         }
 
@@ -133,12 +145,12 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
         assert container != null : "Sub-level container is null";
 
         final Iterable<SubLevel> toUnloadIterator = container.queryIntersecting(bounds);
-        final ObjectOpenHashSet<SubLevel> toUnload = new ObjectOpenHashSet<>();
+        final ObjectOpenHashSet<ServerSubLevel> toUnload = new ObjectOpenHashSet<>();
         for (final SubLevel subLevel : toUnloadIterator) {
-            toUnload.add(subLevel);
+            toUnload.add((ServerSubLevel) subLevel);
         }
 
-        if (VERBOSE) {
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Adding chunk {} to queued unloads", chunkPos);
         }
         this.queuedUnloads.add(chunkPos);
@@ -148,15 +160,19 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
         }
 
         final SubLevelHoldingChunk holdingChunk = this.getOrLoadHoldingChunk(chunkPos, true);
-        final ObjectSet<SubLevel> visited = new ObjectOpenHashSet<>();
+        final ObjectSet<ServerSubLevel> visited = new ObjectOpenHashSet<>();
 
-        for (final SubLevel subLevel : toUnload) {
+        for (final ServerSubLevel subLevel : toUnload) {
+            if (forceLoaded.contains(subLevel)) {
+                visited.add(subLevel);
+                continue;
+            }
+
             if (visited.contains(subLevel)) {
                 continue;
             }
-            final ServerSubLevel serverSubLevel = (ServerSubLevel) subLevel;
 
-            final Collection<ServerSubLevel> chain = SubLevelHelper.getLoadingDependencyChain(serverSubLevel);
+            final Collection<ServerSubLevel> chain = SubLevelHelper.getLoadingDependencyChain(subLevel);
             visited.addAll(chain);
 
             final List<UUID> uuids = chain.stream().map(SubLevel::getUniqueId).toList();
@@ -164,7 +180,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
             for (final ServerSubLevel chainedSubLevel : chain) {
                 final GlobalSavedSubLevelPointer pointer = chainedSubLevel.getLastSerializationPointer();
 
-                if (VERBOSE) {
+                if (this.verboseLogging) {
                     Sable.LOGGER.info("Unloading sub-level {} with pointer {} to chunk {} as holding sub-level", chainedSubLevel, pointer, chunkPos);
                 }
 
@@ -182,14 +198,18 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
      * Saves the whole holding chunk map to disk.
      */
     public void saveAll() {
-        if (VERBOSE) {
+        if (SableConfig.SUB_LEVEL_SAVING_LOG_MESSAGE.get()) {
+            Sable.LOGGER.info("Saving sub-levels for level '{}'/{}", this.level, this.level.dimension().location());
+        }
+
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Saving holding chunk-map");
         }
 
         this.processChanges();
 
         for (final GlobalSavedSubLevelPointer deletion : this.queuedDeletion) {
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Processing queued deletion & clearing data for {}", deletion);
             }
             this.storage.attemptSaveSubLevel(deletion, null);
@@ -214,10 +234,13 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
 
             final List<UUID> uuids = chain.stream().map(SubLevel::getUniqueId).toList();
             for (final ServerSubLevel chainedSubLevel : chain) {
-                if (VERBOSE) {
+                if (this.verboseLogging) {
                     Sable.LOGGER.info("Moving sub-level {} with last pointer {}", chainedSubLevel, chainedSubLevel.getLastSerializationPointer());
                 }
                 this.moveAndSaveSubLevel(chainedSubLevel, moveToChunk, uuids);
+
+                final SubLevelHoldingChunk holdingChunk = this.loadedHoldingChunks.get(moveToChunk.toLong());
+                holdingChunk.markKeepLoaded();
             }
         }
 
@@ -225,12 +248,12 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
             final ChunkPos holdingChunkPos = holdingChunk.getChunkPos();
 
             for (final HoldingSubLevel holdingSubLevel : holdingChunk.getLoadedHoldingSubLevels()) {
-                if (VERBOSE) {
+                if (this.verboseLogging) {
                     Sable.LOGGER.info("Processing holding sub-level {} stored in chunk {} with pointer {}", holdingSubLevel, holdingChunkPos, holdingSubLevel.pointer());
                 }
 
                 if (holdingSubLevel.pointer() == null || !Objects.equals(holdingSubLevel.pointer().chunkPos(), holdingChunkPos)) {
-                    if (VERBOSE) {
+                    if (this.verboseLogging) {
                         Sable.LOGGER.info("Chunk position of holding chunk and pointer mis-match. Moving");
                     }
                     final GlobalSavedSubLevelPointer newPointer = this.moveAndSaveSubLevel(null, holdingSubLevel.data(), holdingSubLevel.pointer(), holdingChunkPos);
@@ -239,12 +262,24 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
                     this.storage.attemptSaveSubLevel(holdingSubLevel.pointer(), holdingSubLevel.data());
                 }
             }
+
+            if (!holdingChunk.shouldKeepLoaded()) {
+                final ChunkHolder chunkHolder = this.level.getChunkSource().chunkMap.visibleChunkMap.get(holdingChunkPos.toLong());
+
+                if (chunkHolder == null || Visibility.fromFullChunkStatus(chunkHolder.getFullStatus()) == Visibility.HIDDEN) {
+                    this.queuedUnloads.add(holdingChunkPos);
+                }
+            }
+
+            if (holdingChunk.isEmpty()) {
+                this.queuedUnloads.add(holdingChunkPos);
+            }
         }
 
         for (final ChunkPos unload : this.queuedUnloads) {
             final SubLevelHoldingChunk holdingChunk = this.loadedHoldingChunks.get(unload.toLong());
 
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Processing queued unload for chunk {} at position {}", holdingChunk, holdingChunk != null ? holdingChunk.getChunkPos() : null);
             }
 
@@ -252,6 +287,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
                 for (final HoldingSubLevel holdingSubLevel : holdingChunk.getLoadedHoldingSubLevels()) {
                     this.allHoldingSubLevels.remove(holdingSubLevel.data().uuid());
                 }
+
                 this.setDirty(unload);
             }
         }
@@ -261,12 +297,16 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
 
             final SubLevelHoldingChunk holdingChunk = this.loadedHoldingChunks.get(longKey);
 
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Saving holding chunk {} at {}", holdingChunk, chunkPos);
             }
 
             if (holdingChunk != null) {
-                this.storage.attemptSaveHoldingChunk(chunkPos, holdingChunk);
+                if (holdingChunk.isEmpty()) {
+                    this.storage.attemptRemoveHoldingChunk(chunkPos);
+                } else {
+                    this.storage.attemptSaveHoldingChunk(chunkPos, holdingChunk);
+                }
             }
         }
 
@@ -276,14 +316,17 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
         this.queuedUnloads.clear();
 
         try {
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Flushing storage");
             }
 
             this.storage.flush();
+            this.storage.pruneCache();
         } catch (final IOException e) {
             Sable.LOGGER.error("Failed to flush sub-level storage to disk", e);
         }
+
+        SubLevelTicketsSavedData.getOrLoad(this.level).setDirty();
     }
 
     private void moveAndSaveSubLevel(final ServerSubLevel subLevel, final ChunkPos moveToChunk, final List<UUID> uuids) {
@@ -291,7 +334,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
         final SubLevelData data = SubLevelSerializer.toData(subLevel, uuids);
         subLevel.setLastSerializationPointer(this.moveAndSaveSubLevel(subLevel, data, lastPointer, moveToChunk));
 
-        if (VERBOSE) {
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Moved sub-level {}. {} -> {}", subLevel, lastPointer, subLevel.getLastSerializationPointer());
         }
     }
@@ -312,7 +355,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
                 throw new IllegalStateException("this shouldn't be possible");
             }
 
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Old chunk is the same as the new chunk position ({}, {})", oldChunkPos, moveToChunk);
                 Sable.LOGGER.info("Saving sub-level data to {}", lastPointer);
             }
@@ -322,7 +365,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
             this.setDirty(moveToChunk);
             return lastPointer;
         } else {
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Saving sub-level data to storage in new chunk, {}", moveToChunk);
             }
             // we moved chunks! remove us from the old one and save to the new one
@@ -336,7 +379,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
                 return null;
             }
 
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("New pointer {}", newPointer);
             }
 
@@ -358,19 +401,15 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
                 }
             }
 
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Clearing last pointer (if exists) {}", lastPointer);
-            }
-
-            if (lastPointer != null) {
-                this.storage.attemptSaveSubLevel(lastPointer, null);
             }
 
             if (oldChunkPos != null) {
                 final SavedSubLevelPointer localPointer = lastPointer.local();
                 final SubLevelHoldingChunk oldHoldingChunk = this.getOrLoadHoldingChunk(oldChunkPos, false);
 
-                if (VERBOSE) {
+                if (this.verboseLogging) {
                     Sable.LOGGER.info("Removing pointer from last holding chunk {}", oldHoldingChunk);
                 }
 
@@ -379,15 +418,19 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
                     oldHoldingChunk.getSubLevelPointers().remove(localPointer);
                     this.setDirty(oldChunkPos);
                 } else {
-                    if (VERBOSE) {
+                    if (this.verboseLogging) {
                         Sable.LOGGER.info("Old holding chunk doesn't exist at {}! This may be a problem", oldChunkPos);
                     }
                 }
             }
 
+            if (lastPointer != null) {
+                this.storage.attemptSaveSubLevel(lastPointer, null);
+            }
+
             final SubLevelHoldingChunk newHoldingChunk = this.getOrLoadHoldingChunk(moveToChunk, true);
 
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Adding pointer to new holding chunk.");
             }
 
@@ -418,13 +461,13 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
         // try to load the holding chunk from disk
         final SubLevelHoldingChunk loadedChunk = this.storage.attemptLoadHoldingChunk(chunkPos);
         if (loadedChunk != null) {
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Loaded chunk at {} from disk", chunkPos);
             }
 
             final List<SavedSubLevelPointer> pointerQueue = loadedChunk.getSubLevelPointers();
             for (final SavedSubLevelPointer pointer : pointerQueue) {
-                if (VERBOSE) {
+                if (this.verboseLogging) {
                     Sable.LOGGER.info("Attempting to read pointer at {} into sub-level data", pointer);
                 }
 
@@ -455,8 +498,37 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
         return null;
     }
 
+    /**
+     * Snatches a sub-level by pointer and UUID and forcefully loads it and its dependencies
+     *
+     * @param pointer the last saved pointer of the sub-level
+     * @param subLevelId the uuid of the sub-level
+     */
+    public void snatchAndLoad(final GlobalSavedSubLevelPointer pointer, final UUID subLevelId) {
+        final ChunkPos chunkPos = pointer.chunkPos();
+        final SubLevelHoldingChunk holdingChunk = this.getOrLoadHoldingChunk(chunkPos, false);
+
+        if (holdingChunk == null) {
+            Sable.LOGGER.error("Attempted to snatch sub-level with ID {} stored at {}, but no holding chunk was present at the pointer chunk position", pointer, subLevelId);
+            return;
+        }
+
+        final Collection<HoldingSubLevel> holdingSubLevels = holdingChunk.snatch(subLevelId);
+
+        if (holdingSubLevels == null) {
+            Sable.LOGGER.error("Attempted to snatch sub-level with ID {} stored at {}, but the requested sub-level wasn't present in the holding chunk", pointer, subLevelId);
+            return;
+        }
+
+        this.setDirty(chunkPos);
+
+        for (final HoldingSubLevel holdingSubLevel : holdingSubLevels) {
+            this.loadHoldingSubLevel(holdingSubLevel);
+        }
+    }
+
     private void setDirty(final ChunkPos chunkPos) {
-        if (VERBOSE) {
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Setting chunk at {} as dirty", chunkPos);
         }
 
@@ -467,6 +539,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
      * Ticks the holding chunk map, checking for sub-levels that are ready to be loaded.
      */
     public void processChanges() {
+        this.verboseLogging = SableConfig.VERBOSE_SERIALIZATION_LOGGING.get();
         this.processUnloads();
 
         final Object2ObjectMap<UUID, HoldingSubLevel> readySubLevels = new Object2ObjectOpenHashMap<>();
@@ -479,24 +552,29 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
         }
 
         for (final HoldingSubLevel holdingSubLevel : readySubLevels.values()) {
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Holding sub-level {} with pointer {} reportedly ready to load", holdingSubLevel, holdingSubLevel.pointer());
             }
 
-            final ServerSubLevel subLevel = SubLevelSerializer.fullyLoad(this.level, holdingSubLevel.data());
-
-            if (subLevel != null) {
-                subLevel.setLastSerializationPointer(holdingSubLevel.pointer());
-            } else {
-                final MinecraftServer server = this.level.getServer();
-                if (server instanceof final SableToastableServer toastable) {
-                    toastable.sable$reportSubLevelLoadFailure(holdingSubLevel.pointer());
-                }
-                Sable.LOGGER.info("Failed to load holding sub-level {} with pointer {}. This is a problem.", holdingSubLevel, holdingSubLevel.pointer());
-            }
-
-            this.allHoldingSubLevels.remove(holdingSubLevel.data().uuid());
+            this.loadHoldingSubLevel(holdingSubLevel);
         }
+    }
+
+    @ApiStatus.Internal
+    public void loadHoldingSubLevel(final HoldingSubLevel holdingSubLevel) {
+        final ServerSubLevel subLevel = SubLevelSerializer.fullyLoad(this.level, holdingSubLevel.data());
+
+        if (subLevel != null) {
+            subLevel.setLastSerializationPointer(holdingSubLevel.pointer());
+        } else {
+            final MinecraftServer server = this.level.getServer();
+            if (server instanceof final SableToastableServer toastable) {
+                toastable.sable$reportSubLevelLoadFailure(holdingSubLevel.pointer());
+            }
+            Sable.LOGGER.info("Failed to load holding sub-level {} with pointer {}. This is a problem.", holdingSubLevel, holdingSubLevel.pointer());
+        }
+
+        this.allHoldingSubLevels.remove(holdingSubLevel.data().uuid());
     }
 
     /**
@@ -510,8 +588,10 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
     }
 
     private void processUnloads() {
+        final Collection<ServerSubLevel> forceLoaded = this.container.collectForceLoadedSubLevels();
+
         for (final long l : this.chunksToUnload) {
-            this.processUnload(new ChunkPos(l));
+            this.processUnload(new ChunkPos(l), forceLoaded);
         }
 
         for (final long l : this.chunksToLoad) {
@@ -522,7 +602,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
     }
 
     public void moveToUnloaded(final ServerSubLevel subLevel, final ChunkPos pos) {
-        if (VERBOSE) {
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Sub-level {} with pointer {} detected unloaded chunk, moving to {}", subLevel, subLevel.getLastSerializationPointer(), pos);
         }
 
@@ -537,7 +617,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
             holdingChunk.acceptHoldingSubLevel(holdingSubLevel);
             this.allHoldingSubLevels.put(holdingSubLevel.data().uuid(), holdingSubLevel);
 
-            if (VERBOSE) {
+            if (this.verboseLogging) {
                 Sable.LOGGER.info("Added {} to holding chunk {}", chainSubLevel, holdingChunk);
             }
 
@@ -550,7 +630,7 @@ public class SubLevelHoldingChunkMap implements AutoCloseable {
     public void queueDeletion(final ServerSubLevel subLevel) {
         final GlobalSavedSubLevelPointer pointer = subLevel.getLastSerializationPointer();
 
-        if (VERBOSE) {
+        if (this.verboseLogging) {
             Sable.LOGGER.info("Queuing sub-level {} with pointer {} for deletion", subLevel, pointer);
         }
 

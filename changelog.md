@@ -1,2 +1,1 @@
- - Fix issues with glibc support on Linux Sable Rapier natives
- - Fix Create Blueprints not working on sub-levels
+- Fix an issue where assembling massless Create contraptions would crash the server

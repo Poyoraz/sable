@@ -1,10 +1,12 @@
 package dev.ryanhcode.sable.mixin.plot;
 
-import dev.ryanhcode.sable.Sable;
+import com.llamalad7.mixinextras.injector.ModifyReturnValue;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.mixinterface.plot.SubLevelContainerHolder;
 import dev.ryanhcode.sable.platform.SablePlatform;
 import dev.ryanhcode.sable.sublevel.storage.SubLevelOccupancySavedData;
+import dev.ryanhcode.sable.sublevel.storage.SubLevelTicketsSavedData;
 import dev.ryanhcode.sable.sublevel.storage.holding.SubLevelHoldingChunkMap;
 import net.minecraft.core.Holder;
 import net.minecraft.core.RegistryAccess;
@@ -24,13 +26,12 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
- * Ticks the sub-level container stored in the {@link LevelsMixin} for server levels
+ * Ticks the sub-level container stored in the {@link SubLevelContainerHolder} for server levels
  */
 @Mixin(ServerLevel.class)
 public abstract class ServerLevelMixin extends Level {
@@ -47,9 +48,10 @@ public abstract class ServerLevelMixin extends Level {
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void sable$init(final CallbackInfo ci) {
-        // Load occupancy data if it isn't already
+        // Load occupancy and ticket data if it isn't already
         if (!SablePlatform.INSTANCE.isWrappedLevel((ServerLevel) (Object) this)) {
             SubLevelOccupancySavedData.getOrLoad((ServerLevel) (Object) this);
+            SubLevelTicketsSavedData.getOrLoad((ServerLevel) (Object) this);
         }
 
         final ServerSubLevelContainer container = (ServerSubLevelContainer) SubLevelContainer.getContainer(this);
@@ -58,22 +60,11 @@ public abstract class ServerLevelMixin extends Level {
         }
     }
 
-    @Inject(method = "close", at = @At("TAIL"))
-    private void sable$close(final CallbackInfo ci) {
-        final ServerSubLevelContainer container = (ServerSubLevelContainer) SubLevelContainer.getContainer(this);
-        if (container != null) {
-            container.close();
-        }
-    }
-
-
     /**
      * high up injection so we're before normal chunk saving
      */
     @Inject(method = "save", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ServerLevel;saveLevelData()V", shift = At.Shift.BEFORE))
     public void sable$saveSubLevels(final ProgressListener progressListener, final boolean bl, final boolean bl2, final CallbackInfo ci) {
-        Sable.LOGGER.info("Saving sub-levels for level '{}'/{}", this, this.dimension().location());
-
         final ServerLevel self = (ServerLevel) (Object) this;
         if (progressListener != null) {
             progressListener.progressStartNoAbort(Component.translatable("menu.savingSubLevels"));
@@ -99,23 +90,36 @@ public abstract class ServerLevelMixin extends Level {
         }
     }
 
-    @Inject(method = "shouldTickBlocksAt", at = @At("HEAD"), cancellable = true)
-    private void sable$shouldTickBlocksAt(final long l, final CallbackInfoReturnable<Boolean> cir) {
+    @ModifyReturnValue(method = "shouldTickBlocksAt", at = @At("RETURN"))
+    private boolean sable$shouldTickBlocksAt(final boolean original, final long chunkPos) {
         final SubLevelContainer plotContainer = SubLevelContainer.getContainer((ServerLevel) (Object) this);
         assert plotContainer != null;
 
-        if (plotContainer.getPlot(new ChunkPos(l)) != null) {
-            cir.setReturnValue(true);
+        if (plotContainer.getPlot(new ChunkPos(chunkPos)) != null) {
+            return true;
         }
+
+        return original;
     }
 
-    @Inject(method = "isNaturalSpawningAllowed(Lnet/minecraft/world/level/ChunkPos;)Z", at = @At("HEAD"), cancellable = true)
-    private void sable$isNaturalSpawningAllowed(final ChunkPos chunkPos, final CallbackInfoReturnable<Boolean> cir) {
+    @ModifyReturnValue(method = "isNaturalSpawningAllowed(Lnet/minecraft/world/level/ChunkPos;)Z", at = @At("RETURN"))
+    private boolean sable$isNaturalSpawningAllowed(boolean original, final ChunkPos chunkPos) {
         final SubLevelContainer plotContainer = SubLevelContainer.getContainer((ServerLevel) (Object) this);
         assert plotContainer != null;
 
         if (plotContainer.getPlot(chunkPos) != null) {
-            cir.setReturnValue(true);
+            return true;
+        }
+
+        return original;
+    }
+
+    @Inject(method = "close", at = @At("TAIL"))
+    private void sable$close(final CallbackInfo ci) {
+        final ServerSubLevelContainer container = (ServerSubLevelContainer) SubLevelContainer.getContainer(this);
+
+        if (container != null) {
+            container.close();
         }
     }
 }

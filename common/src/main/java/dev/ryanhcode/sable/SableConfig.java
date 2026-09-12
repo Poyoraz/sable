@@ -9,6 +9,7 @@ public final class SableConfig {
     public static final ModConfigSpec.BooleanValue SUB_LEVEL_SPLITTING;
     public static final ModConfigSpec.IntValue SUB_LEVEL_SPLITTING_HEATMAP_STEPS_PER_TICK;
     public static final ModConfigSpec.DoubleValue SUB_LEVEL_TRACKING_RANGE;
+    public static final ModConfigSpec.BooleanValue SUB_LEVELS_WITH_PLAYERS_CANNOT_UNLOAD;
     public static final ModConfigSpec.DoubleValue SUB_LEVEL_REMOVE_MIN;
     public static final ModConfigSpec.DoubleValue SUB_LEVEL_REMOVE_MAX;
     public static final ModConfigSpec.DoubleValue VELOCITY_RETAINED_ON_LOAD;
@@ -19,6 +20,8 @@ public final class SableConfig {
     public static final ModConfigSpec.BooleanValue ATTEMPT_UDP_NETWORKING;
     public static final ModConfigSpec.IntValue UDP_LISTEN_PORT;
 
+    public static final ModConfigSpec.BooleanValue SUB_LEVEL_SAVING_LOG_MESSAGE;
+    public static final ModConfigSpec.BooleanValue VERBOSE_SERIALIZATION_LOGGING;
 
     static {
         final ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
@@ -32,6 +35,9 @@ public final class SableConfig {
         SUB_LEVEL_TRACKING_RANGE = builder
                 .comment("The distance to network sub-levels to players at")
                 .defineInRange("sub_level_tracking_range", 320.0, 1.0, Double.MAX_VALUE);
+        SUB_LEVELS_WITH_PLAYERS_CANNOT_UNLOAD = builder
+                .comment("Keeps sub-levels with intersecting players from unloading at all")
+                .define("sub_levels_with_players_cannot_unload", true);
         SUB_LEVEL_REMOVE_MIN = builder
                 .comment("The minimum y coordinate sub-levels can exist at")
                 .defineInRange("sub_level_remove_min", -10_000, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY);
@@ -56,11 +62,17 @@ public final class SableConfig {
                 .comment("If the entire Sable UDP Networking pipeline should be disabled. This can improve compatibility with certain mods like Replay mod and certain networking setups, but will have worse performance and latency for networking sub-levels.")
                 .define("disable_udp_pipeline", false);
         ATTEMPT_UDP_NETWORKING = builder
-                .comment("If Sable should attempt to authenticate with clients and send them sub-level data over UDP")
+                .comment("If Sable should attempt to authenticate with clients and send them sub-level movement data over UDP")
                 .define("attempt_udp_networking", true);
         UDP_LISTEN_PORT = builder
                 .comment("The port Sable will use when sending data over UDP (-1 = The Minecraft Server Instance Port)")
                 .defineInRange("udp_listen_port", -1, -1, 65535);
+        SUB_LEVEL_SAVING_LOG_MESSAGE = builder
+                .comment("If Sable should log when saving sub-levels for a dimension.")
+                .define("sub_level_saving_log_message", true);
+        VERBOSE_SERIALIZATION_LOGGING = builder
+                .comment("If Sable should use verbose logging for its serialization system and the holding chunk-map. Not recommended- for debugging purposes only.")
+                .define("verbose_serialization_logging", false);
 
         SPEC = builder.build();
     }

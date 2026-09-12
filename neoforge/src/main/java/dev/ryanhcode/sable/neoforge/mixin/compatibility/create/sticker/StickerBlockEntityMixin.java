@@ -7,8 +7,8 @@ import com.simibubi.create.content.contraptions.glue.SuperGlueItem;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import dev.ryanhcode.sable.ActiveSableCompanion;
 import dev.ryanhcode.sable.Sable;
-import dev.ryanhcode.sable.api.physics.constraint.fixed.FixedConstraintConfiguration;
-import dev.ryanhcode.sable.api.physics.constraint.fixed.FixedConstraintHandle;
+import dev.ryanhcode.sable.api.physics.constraint.FixedConstraintConfiguration;
+import dev.ryanhcode.sable.api.physics.constraint.FixedConstraintHandle;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.JOMLConversion;
@@ -63,6 +63,12 @@ public abstract class StickerBlockEntityMixin extends SmartBlockEntity implement
     private boolean sable$hadConstraint;
     @Unique
     private boolean sable$hasConstraint;
+
+    /**
+     * kinda hacky but we ball
+     */
+    @Unique
+    private boolean sable$doNotSaveConstraint;
 
     private StickerBlockEntityMixin(final BlockEntityType<?> type, final BlockPos pos, final BlockState state) {
         super(type, pos, state);
@@ -210,6 +216,11 @@ public abstract class StickerBlockEntityMixin extends SmartBlockEntity implement
             throw new IllegalStateException("StickerBlockEntity must be on a ServerLevel to apply constraints.");
         }
 
+        if (thisSubLevel == otherSubLevel) {
+            this.sable$removeConstraint();
+            return;
+        }
+
         final FixedConstraintConfiguration constraint = new FixedConstraintConfiguration(
                 this.sable$constraintPos1,
                 this.sable$constraintPos2,
@@ -245,11 +256,18 @@ public abstract class StickerBlockEntityMixin extends SmartBlockEntity implement
         this.sable$tickConstraint();
     }
 
+    @Override
+    public void sable$saveToContraption(final HolderLookup.Provider registries) {
+        this.sable$doNotSaveConstraint = true;
+        this.saveWithFullMetadata(registries);
+        this.sable$doNotSaveConstraint = false;
+    }
+
     @Inject(method = "write", at = @At("TAIL"))
     public void write(final CompoundTag compound, final HolderLookup.Provider registries, final boolean clientPacket, final CallbackInfo ci) {
         if (clientPacket) {
             compound.putBoolean("SableHasConstraint", this.sable$handle != null);
-        } else if (this.sable$handle != null) {
+        } else if (this.sable$handle != null && !this.sable$doNotSaveConstraint) {
             final CompoundTag constraint = new CompoundTag();
             final BlockPos blockPos = this.getBlockPos();
             constraint.putInt("ThisX", blockPos.getX());
